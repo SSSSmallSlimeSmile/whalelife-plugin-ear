@@ -56,6 +56,12 @@ const DEFAULTS = {
   auto_start_f9: false,
   /** F9 扩展占用的全局热键：F9、F10、Ctrl+F9 这种写法。 */
   f9_hotkey: "F9",
+  /**
+   * 会话正在回复时，按 F9 说的这句话怎么办。
+   * front = 插队，排到其它待办前面（priority 90）；back = 排队，排在后面（priority 10）。
+   * 两种都等当前这一轮说完再进去——宿主明确不支持打断正在跑的那一轮。
+   */
+  queue_mode: "front",
   /** WhaleLife 退出时把 F9 扩展一起关掉。 */
   stop_f9_on_exit: true,
 };
@@ -106,9 +112,10 @@ export async function apply(ctx: Context) {
         // 会话正在回复时别把这句丢了：排进同一个队列，等这一轮说完再送进去。
         if (!/正在回复或维护|正在处理/.test(String(error?.message ?? error))) throw error;
         queued += 1;
-        ctx.logger.info(`耳朵 #${turns} 排队：会话还在回复，等它说完再送`);
+        const front = cfg.queue_mode === "front";
+        ctx.logger.info(`耳朵 #${turns} ${front ? "插队" : "排队"}：会话还在回复，等这一轮说完再送`);
         try {
-          reply = await ctx.sessions.enqueue({ sessionId, text, origin, priority: 10 });
+          reply = await ctx.sessions.enqueue({ sessionId, text, origin, priority: front ? 90 : 10 });
         } finally {
           queued = Math.max(0, queued - 1);
         }

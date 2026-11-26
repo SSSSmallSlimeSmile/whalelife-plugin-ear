@@ -57,6 +57,15 @@ const FIELDS = {
     label: "投进哪个会话",
     hint: "默认投到识别完成时 WhaleLife 的当前会话，所有窗口共用这个选择。也可以固定投到指定会话。",
   },
+  queue_mode: {
+    kind: "select",
+    label: "会话正忙时按 F9 说的话",
+    hint: "插队：排到其它待办前面先处理。排队：排在后面等。两种都不会打断正在说的那一轮——宿主没有这个口子，区别只是先后。",
+    options: [
+      { value: "front", label: "插队先处理" },
+      { value: "back", label: "排队等" },
+    ],
+  },
   speak_reply: {
     kind: "boolean",
     label: "F9 说完后自动念回复",
@@ -183,7 +192,7 @@ function field(key: FieldKey, cfg: any, disabled = false, dynSessions?: { id: st
 }
 /** 渲染配置页：结构和配色都走 /ui/styles.css，跟管理页同一套。 */
 /** 耳朵那一页的字段，按顺序排。 */
-const EAR_KEYS: FieldKey[] = ["python", "device", "engine", "model", "sensevoice_dir", "language", "initial_prompt", "silence", "max_len", "target_session", "auto_start", "f9_hotkey", "f9_python", "auto_start_f9", "stop_f9_on_exit"];
+const EAR_KEYS: FieldKey[] = ["python", "device", "engine", "model", "sensevoice_dir", "language", "initial_prompt", "silence", "max_len", "target_session", "queue_mode", "auto_start", "f9_hotkey", "f9_python", "auto_start_f9", "stop_f9_on_exit"];
 /** 嗓子（念话）那一页的字段。 */
 const MOUTH_KEYS: FieldKey[] = ["speak_reply"];
 
