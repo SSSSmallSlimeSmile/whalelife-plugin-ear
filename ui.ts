@@ -55,7 +55,7 @@ const FIELDS = {
     kind: "text",
     dynamic: "sessions",
     label: "投进哪个会话",
-    hint: "默认「当前会话」——你在哪个窗口说话就投哪个。选一条固定的，就是不管在哪个窗口按 F9，话都投到那一条里去。",
+    hint: "默认投到识别完成时 WhaleLife 的当前会话，所有窗口共用这个选择。也可以固定投到指定会话。",
   },
   speak_reply: {
     kind: "boolean",
@@ -292,42 +292,49 @@ const msg = document.getElementById("msg");
 const ok = document.getElementById("ok");
 form.addEventListener("submit", async (e) => {
   e.preventDefault();
+  if (ok.disabled) return;
   const data = {};
   for (const el of form.elements) {
     if (!el.name || el.disabled) continue;
     data[el.name] = el.type === "checkbox" ? el.checked : el.value;
   }
-  ok.disabled = true; msg.className = ""; msg.textContent = "保存中…";
+  ok.disabled = pin.disabled = pinSelect.disabled = true;
+  msg.className = ""; msg.textContent = "保存中…";
   try {
     const res = await fetch("/plugins/ear/save", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
+    syncPin(data.target_session);
     msg.textContent = "已保存，下次开边车时生效";
   } catch (error) {
     msg.className = "err";
     msg.textContent = "没存上：" + (error?.message || error);
-  } finally { ok.disabled = false; }
+  } finally { ok.disabled = pin.disabled = pinSelect.disabled = false; }
 });
 // 固定 / 解除固定：改的就是 target_session 一个字段，投递前会重读配置，立刻生效。
 const pin = document.getElementById("ear-pin");
 const pinMsg = document.getElementById("ear-pinmsg");
 const pinSelect = document.getElementById("ear-target");
+const syncPin = (value) => {
+  pinSelect.value = value;
+  pin.dataset.fixed = value ? "1" : "0";
+  pin.textContent = value ? "解除固定" : "固定";
+  const name = pinSelect.options[pinSelect.selectedIndex]?.text || value;
+  pinMsg.textContent = value ? ("已固定到 " + name + "，再按一下解除") : "跟随活跃窗口";
+};
 pin.addEventListener("click", async () => {
   const fixed = pin.dataset.fixed === "1";
   const value = fixed ? "" : String(pinSelect?.value ?? "");
   if (!fixed && !value) { pinMsg.textContent = "先在上面选一个会话，再按固定"; return; }
-  pin.disabled = true;
+  ok.disabled = pin.disabled = pinSelect.disabled = true;
   try {
     const res = await fetch("/plugins/ear/save", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ target_session: value }) });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
-    pin.dataset.fixed = value ? "1" : "0";
-    pin.textContent = value ? "解除固定" : "固定";
-    const name = value ? (pinSelect.options[pinSelect.selectedIndex]?.text || value) : "";
-    pinMsg.textContent = value ? ("已固定到 " + name + "，再按一下解除") : "跟随活跃窗口";
+    syncPin(value);
   } catch (error) {
     pinMsg.textContent = "没存上：" + (error?.message || error);
-  } finally { pin.disabled = false; }
+  } finally { ok.disabled = pin.disabled = pinSelect.disabled = false; }
 });
 const result = document.getElementById("result");
 const show = (kind, text) => {

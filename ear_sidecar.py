@@ -262,22 +262,33 @@ def main() -> int:
         log("什么都没做：要监听请加 --start")
         return 2
 
-    worker = threading.Thread(target=ear.loop, name="ear-loop", daemon=True)
-    worker.start()
-    # 父进程（WhaleLife）关掉 stdin 或退出时，这里读到 EOF 就收声。
-    try:
-        while worker.is_alive():
-            line = sys.stdin.readline()
-            if line == "":
-                log("父进程走了，收声")
-                break
-            if line.strip() == "quit":
-                break
-    except Exception:
-        pass
+    failed = False
+
+    def watch_stdin():
+        try:
+            with open(sys.stdin.fileno(), "rb", buffering=0, closefd=False) as stdin:
+                for line in stdin:
+                    if line.strip() == b"quit":
+                        break
+        finally:
+            ear.stop.set()
+
+    def listen():
+        nonlocal failed
+        try:
+            ear.loop()
+        except Exception as exc:
+            failed = True
+            emit({"event": "error", "error": str(exc)})
+        finally:
+            ear.stop.set()
+
+    threading.Thread(target=watch_stdin, name="ear-stdin", daemon=True).start()
+    threading.Thread(target=listen, name="ear-loop", daemon=True).start()
+    ear.stop.wait()
     ear.close()
     emit({"event": "closed"})
-    return 0
+    return int(failed)
 
 
 if __name__ == "__main__":

@@ -104,9 +104,12 @@ def load_cfg() -> dict:
     if os.path.exists(CFG_PATH):
         try:
             with open(CFG_PATH, "r", encoding="utf-8-sig") as fh:
-                cfg.update(json.load(fh) or {})
-        except (OSError, ValueError):
-            pass
+                saved = json.load(fh)
+            if not isinstance(saved, dict):
+                raise ValueError("配置必须是 JSON 对象")
+            cfg.update(saved)
+        except (OSError, ValueError) as exc:
+            log(f"读取 f9.json 失败，使用默认值：{exc}", cfg)
     else:
         try:
             with open(CFG_PATH, "w", encoding="utf-8") as fh:

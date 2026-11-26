@@ -92,11 +92,11 @@ export async function apply(ctx: Context) {
 
   /** 把一句话当用户消息投进会话。 */
   const deliver = async (text: string) => {
-    const sessionId = cfg.target_session || (await ctx.sessions.current());
     turns += 1;
     last = text;
     ctx.logger.info(`耳朵 #${turns}：${text}`);
     try {
+      const sessionId = cfg.target_session || (await ctx.sessions.current());
       const reply = await ctx.sessions.run({
         sessionId,
         text,
@@ -124,9 +124,11 @@ export async function apply(ctx: Context) {
         }
       }
 
+      return { ok: true as const };
     } catch (error: any) {
       lastError = error?.message ?? String(error);
       ctx.logger.warn(`耳朵投递失败：${lastError}`);
+      return { ok: false as const, error: lastError };
     }
   };
 
@@ -149,6 +151,11 @@ export async function apply(ctx: Context) {
       ctx.logger.info(`耳朵自检：${msg.ok ? "通过" : "失败 " + (msg.error ?? "")}`);
       return;
     }
+    if (msg.event === "error") {
+      lastError = String(msg.error ?? "边车初始化失败");
+      ctx.logger.warn(`耳朵边车出错：${lastError}`);
+      return;
+    }
     if (msg.event === "closed") {
       listening = false;
       ready = false;
@@ -160,8 +167,11 @@ export async function apply(ctx: Context) {
   };
 
   const start = async () => {
-    if (child) return { ok: false, reason: "已经在听了" };
+    if (child) return { ok: false as const, reason: "已经在听了" };
     await reload();
+    if (child) return { ok: false as const, reason: "已经在听了" };
+    if (ctx.signal.aborted) return { ok: false as const, reason: "插件正在停止" };
+    if (!cfg.python) return { ok: false as const, reason: "没填 Python 解释器" };
     const args = [
       cfg.script,
       "--start",
@@ -199,15 +209,32 @@ export async function apply(ctx: Context) {
       const text = String(chunk).trim();
       if (text) ctx.logger.info(`[ear] ${text.slice(0, 400)}`);
     });
-    c.on("exit", (code) => {
-      ctx.logger.info(`耳朵边车退出，code=${code}`);
+    const reset = () => {
+      if (child !== c) return;
       child = null;
       listening = false;
       ready = false;
+    };
+    c.stdin.on("error", (error) => {
+      ctx.logger.warn(`耳朵边车 stdin 出错：${error.message}`);
     });
-    const pid = c.pid ?? null;
-    ctx.logger.info(`耳朵拉起，pid=${pid}`);
-    return { ok: true, pid };
+    c.on("exit", (code) => {
+      ctx.logger.info(`耳朵边车退出，code=${code}`);
+      reset();
+    });
+    return new Promise<{ ok: true; pid: number | null } | { ok: false; reason: string }>((resolve) => {
+      c.on("error", (error) => {
+        lastError = error.message;
+        ctx.logger.warn(`耳朵边车出错：${lastError}`);
+        if (c.pid === undefined) reset();
+        resolve({ ok: false, reason: lastError });
+      });
+      c.once("spawn", () => {
+        const pid = c.pid ?? null;
+        ctx.logger.info(`耳朵拉起，pid=${pid}`);
+        resolve({ ok: true, pid });
+      });
+    });
   };
 
   const stop = async () => {
@@ -217,7 +244,7 @@ export async function apply(ctx: Context) {
       c.stdin.write("quit\n");
     } catch {}
     await new Promise((r) => setTimeout(r, 1500));
-    if (child) {
+    if (child === c) {
       try {
         c.kill();
       } catch {}
@@ -505,8 +532,15 @@ export async function apply(ctx: Context) {
       if (!r.ok) return replyJson(res, 500, { ok: false, error: r.error });
       const text = String(r.text ?? "").trim();
       if (!text) return replyJson(res, 200, { ok: true, text: "", detail: r.note ?? "没听清说什么" });
-      void deliver(text);
-      return replyJson(res, 200, { ok: true, text });
+      // 投递是异步的一整轮，不能等它跑完再回；但会话被删、会话忙这类会当场抛，
+      // 给一小段时间让这类错误浮出来，免得页面显示"已投递"而其实根本没进去。
+      const sending = deliver(text);
+      const early = await Promise.race([
+        sending,
+        new Promise<null>((r) => setTimeout(() => r(null), 1500)),
+      ]);
+      if (early && !early.ok) return replyJson(res, 500, { ok: false, text, error: `投递失败：${early.error}` });
+      return replyJson(res, 200, { ok: true, text, delivery: early ? "done" : "accepted" });
     } catch (error: any) {
       return replyJson(res, 500, { ok: false, error: error?.message ?? String(error) });
     } finally {
@@ -537,7 +571,7 @@ export async function apply(ctx: Context) {
       const patchIn = sanitize(await readBody(req));
       const keys = Object.keys(patchIn);
       if (!keys.length) throw new Error("没有可保存的字段");
-      const merged = { ...(await ctx.config.read<any>("config.json").catch(() => null)), ...patchIn };
+      const merged = { ...(await ctx.config.read<any>("config.json")), ...patchIn };
       await ctx.config.save("config.json", merged);
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
       res.end(JSON.stringify({ ok: true, saved: keys }));
