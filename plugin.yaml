@@ -1,5 +1,5 @@
 id: ear
 name: 耳朵
 description: 麦克风转字投进会话（SenseVoice）。回话由「嗓子」插件负责，默认关闭
-version: 0.1.1
+version: 0.1.2
 apiVersion: "1"
