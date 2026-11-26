@@ -1,0 +1,12 @@
+# 运行产物：配置、合成出来的语音
+data/
+# Python 边车缓存
+__pycache__/
+*.pyc
+# F9 助手第一次运行自动生成的配置与日志
+f9/f9.json
+f9/f9.log
+# 我自己的临时备份
+*.bak-*
+.tmp/
+.artifacts/

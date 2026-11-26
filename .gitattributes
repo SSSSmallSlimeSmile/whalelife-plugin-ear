@@ -1,0 +1,2 @@
+# 源码一律按原样（LF）存取，别让 core.autocrlf 改行尾
+* -text
