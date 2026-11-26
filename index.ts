@@ -85,6 +85,7 @@ export async function apply(ctx: Context) {
   let listening = false;
   let ready = false;
   let turns = 0;
+  let queued = 0; // 会话忙时排着队、还没送进去的句子数
   let last = "";
   let lastError = "";
   let lastF9Error = "";
@@ -97,11 +98,21 @@ export async function apply(ctx: Context) {
     ctx.logger.info(`耳朵 #${turns}：${text}`);
     try {
       const sessionId = cfg.target_session || (await ctx.sessions.current());
-      const reply = await ctx.sessions.run({
-        sessionId,
-        text,
-        origin: { platform: "ear", action: "hold_to_talk" },
-      });
+      const origin = { platform: "ear", action: "hold_to_talk" } as const;
+      let reply = "";
+      try {
+        reply = await ctx.sessions.run({ sessionId, text, origin });
+      } catch (error: any) {
+        // 会话正在回复时别把这句丢了：排进同一个队列，等这一轮说完再送进去。
+        if (!/正在回复或维护|正在处理/.test(String(error?.message ?? error))) throw error;
+        queued += 1;
+        ctx.logger.info(`耳朵 #${turns} 排队：会话还在回复，等它说完再送`);
+        try {
+          reply = await ctx.sessions.enqueue({ sessionId, text, origin, priority: 10 });
+        } finally {
+          queued = Math.max(0, queued - 1);
+        }
+      }
       const replyText = String(reply ?? "").trim();
       ctx.logger.info(`耳朵回复 ${replyText.length} 字`);
       // 回话交给「嘴巴」插件念。没装、被停用、或者开关关着，都只是不出声，不影响打字。
@@ -286,6 +297,7 @@ export async function apply(ctx: Context) {
         listening ? (ready ? "在听（引擎已就绪）" : "在听（模型还在加载）") : "闭嘴",
         `已转 ${turns} 句`,
       ];
+      if (queued) parts.push(`排队 ${queued} 句`);
       if (last) parts.push(`最后一句：${last}`);
       if (lastError) parts.push(`上次出错：${lastError}`);
       if (child?.pid) parts.push(`pid=${child.pid}`);
