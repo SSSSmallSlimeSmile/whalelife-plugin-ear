@@ -314,7 +314,7 @@ form.addEventListener("submit", async (e) => {
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
     syncPin(data.target_session);
-    msg.textContent = "已保存，下次开边车时生效";
+    msg.textContent = "已保存，下次投递使用新的会话和排队设置";
   } catch (error) {
     msg.className = "err";
     msg.textContent = "没存上：" + (error?.message || error);
@@ -332,6 +332,7 @@ const syncPin = (value) => {
   pinMsg.textContent = value ? ("已固定到 " + name + "，再按一下解除") : "跟随活跃窗口";
 };
 pin.addEventListener("click", async () => {
+  if (pin.disabled) return;
   const fixed = pin.dataset.fixed === "1";
   const value = fixed ? "" : String(pinSelect?.value ?? "");
   if (!fixed && !value) { pinMsg.textContent = "先在上面选一个会话，再按固定"; return; }
@@ -409,7 +410,9 @@ const startRec = async () => {
         const res = await fetch("/plugins/ear/utter", { method: "POST", headers: { "Content-Type": "audio/wav" }, body: wav });
         const body = await res.json().catch(() => ({}));
         if (!res.ok || body.ok === false) throw new Error(body.error || ("HTTP " + res.status));
-        tmsg.textContent = body.text ? "已投递：" + body.text : (body.detail || "没听清");
+        tmsg.textContent = body.text
+          ? (body.delivery === "accepted" ? "投递结果待确认，可查看 ear_status：" : "已投递：") + body.text
+          : (body.detail || "没听清");
       } catch (error) {
         tmsg.textContent = "没成功：" + (error?.message || error);
       } finally {

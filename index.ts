@@ -91,7 +91,7 @@ export async function apply(ctx: Context) {
   let listening = false;
   let ready = false;
   let turns = 0;
-  let queued = 0; // 会话忙时排着队、还没送进去的句子数
+  let pending = 0;
   let last = "";
   let lastError = "";
   let lastF9Error = "";
@@ -99,31 +99,22 @@ export async function apply(ctx: Context) {
 
   /** 把一句话当用户消息投进会话。 */
   const deliver = async (text: string) => {
-    turns += 1;
+    const turn = ++turns;
     last = text;
-    ctx.logger.info(`耳朵 #${turns}：${text}`);
+    pending += 1;
     try {
-      const sessionId = cfg.target_session || (await ctx.sessions.current());
+      await reload();
+      const { target_session, queue_mode, speak_reply } = cfg;
+      const sessionId = target_session || (await ctx.sessions.current());
       const origin = { platform: "ear", action: "hold_to_talk" } as const;
-      let reply = "";
-      try {
-        reply = await ctx.sessions.run({ sessionId, text, origin });
-      } catch (error: any) {
-        // 会话正在回复时别把这句丢了：排进同一个队列，等这一轮说完再送进去。
-        if (!/正在回复或维护|正在处理/.test(String(error?.message ?? error))) throw error;
-        queued += 1;
-        const front = cfg.queue_mode === "front";
-        ctx.logger.info(`耳朵 #${turns} ${front ? "插队" : "排队"}：会话还在回复，等这一轮说完再送`);
-        try {
-          reply = await ctx.sessions.enqueue({ sessionId, text, origin, priority: front ? 90 : 10 });
-        } finally {
-          queued = Math.max(0, queued - 1);
-        }
-      }
+      const input = { sessionId, text, origin };
+      const reply = typeof ctx.sessions.enqueue === "function"
+        ? await ctx.sessions.enqueue({ ...input, priority: queue_mode === "front" ? 90 : 10 })
+        : await ctx.sessions.run(input);
       const replyText = String(reply ?? "").trim();
       ctx.logger.info(`耳朵回复 ${replyText.length} 字`);
       // 回话交给「嘴巴」插件念。没装、被停用、或者开关关着，都只是不出声，不影响打字。
-      if (cfg.speak_reply && replyText) {
+      if (speak_reply && replyText) {
         try {
           const said: any = await ctx.tools.call(
             "mouth_say",
@@ -144,9 +135,12 @@ export async function apply(ctx: Context) {
 
       return { ok: true as const };
     } catch (error: any) {
-      lastError = error?.message ?? String(error);
+      const message = error?.message ?? String(error);
+      lastError = `#${turn} ${message}`;
       ctx.logger.warn(`耳朵投递失败：${lastError}`);
-      return { ok: false as const, error: lastError };
+      return { ok: false as const, error: message };
+    } finally {
+      pending -= 1;
     }
   };
 
@@ -304,7 +298,7 @@ export async function apply(ctx: Context) {
         listening ? (ready ? "在听（引擎已就绪）" : "在听（模型还在加载）") : "闭嘴",
         `已转 ${turns} 句`,
       ];
-      if (queued) parts.push(`排队 ${queued} 句`);
+      if (pending) parts.push(`处理中（含排队）${pending} 句`);
       if (last) parts.push(`最后一句：${last}`);
       if (lastError) parts.push(`上次出错：${lastError}`);
       if (child?.pid) parts.push(`pid=${child.pid}`);
@@ -326,31 +320,44 @@ export async function apply(ctx: Context) {
     return w !== p && existsSync(w) ? w : p;
   };
 
-  const f9Start = async () => {
+  const f9Start = async (): Promise<{ ok: boolean; reason?: string; pid?: number | null; python?: string }> => {
     if (f9Child) return { ok: false, reason: "已经在跑了" };
     await reload();
+    if (f9Child) return { ok: false, reason: "已经在跑了" };
+    if (ctx.signal.aborted) return { ok: false, reason: "插件正在停止" };
     if (!existsSync(f9Script)) return { ok: false, reason: "脚本不在：" + f9Script };
     const exe = f9Interpreter();
     try {
       const c = spawn(exe, [f9Script, "--hotkey", cfg.f9_hotkey || "F9"], {
         cwd: join(HERE, "f9"),
         windowsHide: true,
-        stdio: "ignore",
+        stdio: ["ignore", "ignore", "pipe"],
         env: { ...process.env, PYTHONIOENCODING: "utf-8" },
       });
       f9Child = c;
       f9StartedAt = Date.now();
       lastF9Error = "";
-      c.on("exit", (code) => {
-        ctx.logger.info("F9 扩展退出，code=" + code);
+      c.stderr?.setEncoding("utf8");
+      c.stderr?.on("data", (chunk: string) => {
+        if (f9Child !== c || !chunk.trim()) return;
+        lastF9Error = chunk.trim().slice(-1000);
+        ctx.logger.warn(`F9 扩展：${lastF9Error}`);
+      });
+      c.on("close", (code, signal) => {
+        if (f9Child !== c) return;
+        if (code !== 0 && !signal && !lastF9Error) lastF9Error = `F9 扩展异常退出，code=${code}`;
         f9Child = null;
       });
-      c.on("error", (e: Error) => {
-        lastF9Error = e.message;
-        f9Child = null;
+      return await new Promise<{ ok: boolean; reason?: string; pid?: number | null; python?: string }>((resolve) => {
+        c.on("error", (e: Error) => {
+          if (f9Child === c) lastF9Error = e.message;
+          resolve({ ok: false, reason: e.message });
+        });
+        c.once("spawn", () => {
+          ctx.logger.info("F9 扩展拉起，pid=" + (c.pid ?? "?") + "，解释器 " + exe);
+          resolve({ ok: true, pid: c.pid ?? null, python: exe });
+        });
       });
-      ctx.logger.info("F9 扩展拉起，pid=" + (c.pid ?? "?") + "，解释器 " + exe);
-      return { ok: true, pid: c.pid ?? null, python: exe };
     } catch (error: any) {
       return { ok: false, reason: error?.message ?? String(error) };
     }
@@ -363,11 +370,11 @@ export async function apply(ctx: Context) {
       c.kill();
     } catch {}
     await new Promise((r) => setTimeout(r, 400));
-    if (f9Child) {
+    if (f9Child === c && c.exitCode === null && c.signalCode === null) {
       try {
-        f9Child.kill("SIGKILL");
+        c.kill("SIGKILL");
       } catch {}
-      f9Child = null;
+      return { ok: false, reason: "F9 扩展仍在退出，请查看状态" };
     }
     ctx.logger.info("F9 扩展已收");
     return { ok: true };
@@ -543,7 +550,6 @@ export async function apply(ctx: Context) {
     try {
       const buf = await readAudio(req);
       if (!buf.length) return replyJson(res, 400, { ok: false, error: "没收到音频" });
-      await reload();
       dir = mkdtempSync(join(tmpdir(), "whalelife-ear-"));
       const file = join(dir, "hold.wav");
       writeFileSync(file, buf);
@@ -554,10 +560,11 @@ export async function apply(ctx: Context) {
       // 投递是异步的一整轮，不能等它跑完再回；但会话被删、会话忙这类会当场抛，
       // 给一小段时间让这类错误浮出来，免得页面显示"已投递"而其实根本没进去。
       const sending = deliver(text);
+      let timer: ReturnType<typeof setTimeout> | undefined;
       const early = await Promise.race([
         sending,
-        new Promise<null>((r) => setTimeout(() => r(null), 1500)),
-      ]);
+        new Promise<null>((r) => { timer = setTimeout(() => r(null), 1500); }),
+      ]).finally(() => clearTimeout(timer));
       if (early && !early.ok) return replyJson(res, 500, { ok: false, text, error: `投递失败：${early.error}` });
       return replyJson(res, 200, { ok: true, text, delivery: early ? "done" : "accepted" });
     } catch (error: any) {
@@ -566,8 +573,8 @@ export async function apply(ctx: Context) {
       if (dir) {
         try {
           rmSync(dir, { recursive: true, force: true });
-        } catch {
-          /* 临时目录清不掉不算错 */
+        } catch (error) {
+          ctx.logger.warn(`耳朵清理识别临时目录失败：${String(error)}`);
         }
       }
     }
@@ -585,13 +592,19 @@ export async function apply(ctx: Context) {
     { title: "耳朵", navigation: true },
   );
 
+  let saving: Promise<void> = Promise.resolve();
   ctx.web.api("/plugins/ear/save", async (req: any, res: any) => {
     try {
       const patchIn = sanitize(await readBody(req));
       const keys = Object.keys(patchIn);
       if (!keys.length) throw new Error("没有可保存的字段");
-      const merged = { ...(await ctx.config.read<any>("config.json")), ...patchIn };
-      await ctx.config.save("config.json", merged);
+      const write = saving.then(async () => {
+        ctx.signal.throwIfAborted();
+        const merged = { ...(await ctx.config.read<any>("config.json")), ...patchIn };
+        await ctx.config.save("config.json", merged);
+      });
+      saving = write.catch(() => {});
+      await write;
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
       res.end(JSON.stringify({ ok: true, saved: keys }));
     } catch (error: any) {

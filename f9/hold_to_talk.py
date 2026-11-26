@@ -95,8 +95,8 @@ def log(line: str, cfg: dict | None = None) -> None:
     try:
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {line}\n")
-    except OSError:
-        pass
+    except (OSError, TypeError, ValueError) as exc:
+        print(f"写 F9 日志失败：{exc}", file=sys.stderr)
 
 
 def load_cfg() -> dict:
@@ -109,7 +109,9 @@ def load_cfg() -> dict:
                 raise ValueError("配置必须是 JSON 对象")
             cfg.update(saved)
         except (OSError, ValueError) as exc:
-            log(f"读取 f9.json 失败，使用默认值：{exc}", cfg)
+            message = f"读取 f9.json 失败，使用默认值：{exc}"
+            log(message, cfg)
+            print(message, file=sys.stderr)
     else:
         try:
             with open(CFG_PATH, "w", encoding="utf-8") as fh:
@@ -159,7 +161,8 @@ def post_wav(base: str, cookie: str, wav_bytes: bytes) -> str:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=120) as res:
+        # Host recognition can take 240 seconds, followed by a 1.5-second delivery check.
+        with urllib.request.urlopen(req, timeout=250) as res:
             payload = json.loads(res.read().decode("utf-8") or "{}")
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", "replace")
@@ -169,6 +172,8 @@ def post_wav(base: str, cookie: str, wav_bytes: bytes) -> str:
     if not payload.get("ok"):
         return f"识别失败：{payload.get('error') or payload}"
     text = (payload.get("text") or "").strip()
+    if text and payload.get("delivery") == "accepted":
+        return f"投递结果待确认，可查看 ear_status：{text}"
     return text or (payload.get("detail") or "没听清说什么")
 
 
@@ -255,7 +260,7 @@ def main() -> int:
     name = hotkey_arg() or str(cfg.get("hotkey") or "F9")
     vk, mods = parse_hotkey(name)
     if vk is None:
-        print(f"不认识的热键：{name}")
+        print(f"不认识的热键：{name}", file=sys.stderr)
         return 2
 
     base = str(cfg.get("url") or DEFAULTS["url"])
@@ -265,10 +270,10 @@ def main() -> int:
     beep = bool(cfg.get("beep", True))
 
     if not user32.RegisterHotKey(None, HOTKEY_ID, MOD_NOREPEAT | mods, vk):
-        log(f"hotkey {name} 已被占用，注册失败")
-        print(f"{name} 已被别的程序占用，换一个键（改 f9.json 的 hotkey）。")
+        log(f"hotkey {name} 已被占用，注册失败", cfg)
+        print(f"{name} 已被别的程序占用，换一个键（改 f9.json 的 hotkey）。", file=sys.stderr)
         return 3
-    log(f"hotkey {name} 已注册，端口 {base}")
+    log(f"hotkey {name} 已注册，端口 {base}", cfg)
 
     state, frames, stream, np = recorder(rate, cfg.get("device"))
     msg = wintypes.MSG()
@@ -304,18 +309,18 @@ def main() -> int:
                 chime("up")
             held = time.time() - began
             if held < min_s:
-                log(f"skip too_short={held:.2f}s")
+                log(f"skip too_short={held:.2f}s", cfg)
                 continue
             wav_bytes = to_wav(frames, rate)
             if len(wav_bytes) < 2000:
-                log("skip empty")
+                log("skip empty", cfg)
                 continue
             use = ensure_cookie()
             if not use:
-                log("no cookie, 投不进去")
+                log("no cookie, 投不进去", cfg)
                 continue
             result = post_wav(base, use, wav_bytes)
-            log(f"held={held:.2f}s -> {result}")
+            log(f"held={held:.2f}s -> {result}", cfg)
     finally:
         try:
             stream.stop()
